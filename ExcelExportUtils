@@ -1,0 +1,561 @@
+package com.hthk.dt.billing.reporting.utils;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.math.BigDecimal;
+import java.text.DateFormat;
+import java.text.DecimalFormat;
+import java.text.SimpleDateFormat;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
+
+import org.apache.commons.beanutils.BeanUtils;
+import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.poi.hssf.usermodel.HSSFDataFormat;
+import org.apache.poi.ss.usermodel.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.hthk.dt.billing.reporting.custom.ExcelColumn;
+
+/**
+ * @Author: samccs
+ * @Date: 2020/5/15 上午 09:32
+ * @Version 1.0
+ */
+public class ExcelExportUtils {
+
+	static Logger Log = LoggerFactory.getLogger(ExcelExportUtils.class);
+
+	private static final Class<?>[] NUMBER_CLASS_TYPE = { BigDecimal.class, Integer.class,Long.class, Double.class };
+	private static final Class<?>[] BOOLEAN_CLASS_TYPE = { Boolean.class };
+
+	private static final String XLS = ".xls";
+	private static final String XLSX = ".xlsx";
+
+	static final String DateRangeformatStr = "dd-MMM-yyyy";
+	public static final String AmountFormat = "#,##0.00"; // "0.00" "¥#,##0" "$#,##0.00" "$#,##0.00"
+	private static final String DateFormatStr = "dd/MMM/YYYY";
+
+	public static final String TenantPathFormat = "Tenant Path : %s";
+	public static final String NetworkFormat = "Network : %s";
+	public static final String DateRangeParamformat = "Date : %s to %s";
+	public static final String GL_CODE_Format = "GL code : %s";
+	public static final String PRODUCT_ID_Format = "Product ID : %s";
+	public static final String CALL_TYPE_FORMAT = "Call Type : %s";
+
+
+	// Report Example:
+	// AR Summary By Journal Type Report
+	// Network : LTE
+	// Tenant Path: HTHK_MO_MO
+	// Date Range: dd-mon-yyyy to dd-mon-yyyy
+	// Tenant Path Journal Type Record Count Record Amount
+	// HTHK_MO_MO MJ 1 68
+	// HTHK_MO_MO SJ 8 86.48
+	// HTHK_MO_MO 76 1367.52
+	public static <T> void writerExcel(Workbook workbook, List<T> objectList, String pathname, String sheetName,
+			Class<T> tClass, List<String> summary, List<String> reportParamList) throws Exception {
+		// add Report Param in header
+		addReportParamList(workbook, sheetName,reportParamList);
+		// write object to workbook
+		objectToWorkBook(workbook, sheetName,objectList,  tClass);
+		// add Total
+		addTotal(workbook,sheetName,objectList,tClass);
+		// add summary to workbook
+		addSummary(workbook,sheetName, summary);
+		// Write the output to a file
+		write(workbook, pathname);
+		return;
+	}
+
+
+
+	public static void addReportParamList(Workbook workbook, String sheetName, List<String> reportParamList) {
+		// define the Start Row
+		Sheet sheet = workbook.getSheet(sheetName);
+		int startRow = 0;
+		if (null != sheet) {
+			startRow = sheet.getLastRowNum() + 2;
+		} else {
+			sheet = workbook.createSheet(sheetName);
+		}
+
+		String reportTitle = sheetName;
+
+		int titleRowIndex = startRow;
+		Row titleRow = sheet.createRow(titleRowIndex);
+		Cell firstCell = titleRow.createCell(0);
+		firstCell.setCellStyle(getHeadingCellStyle(workbook));
+		firstCell.setCellValue(reportTitle);
+
+		startRow = titleRowIndex + 1;
+
+		int rowindex = startRow;
+		// Set param
+		if (CollectionUtils.isNotEmpty(reportParamList)) {
+			for (int paramIndex = 0; paramIndex < reportParamList.size(); paramIndex++) {
+				sheet.createRow(rowindex).createCell(0).setCellValue(reportParamList.get(paramIndex));
+
+				// row index + 1
+				rowindex++;
+			}
+		}
+	}
+	public static <T> Sheet getSheet(Workbook workbook, String sheetName){
+		if (sheetName.length() > 31) {
+			sheetName = sheetName.substring(0,31);
+		}
+		return workbook.getSheet(sheetName);
+	}
+
+	private static <T> void addTotal(Workbook workbook, String sheetName, List<T> objectList, Class<T> tClass) {
+		if (sheetName.length() > 31) {
+			sheetName = sheetName.substring(0,31);
+		}
+		Sheet sheet = workbook.getSheet(sheetName);
+		int startRow;
+		if (null != sheet) {
+			startRow = sheet.getLastRowNum() + 1;
+		} else {
+			// if Sheet not exists,no need to count total
+			return;
+		}
+		Row totalRow = sheet.createRow(startRow);
+		Field[] fields = tClass.getDeclaredFields();
+		boolean totalCountFlag = false;
+		Integer totalCountStartRow = null;
+		for (int i = 0; i < fields.length; i++) {
+			// According to the Field Create Row Header
+			Field field = fields[i];
+			ExcelColumn annotation = field.getAnnotation(ExcelColumn.class);
+			Class<?> type = field.getType();
+			if (null == annotation || !Arrays.asList(NUMBER_CLASS_TYPE).contains(type) ) {
+				continue;
+			}
+			boolean countFlag = annotation.countFlag();
+			String format = annotation.numberFormat();
+			if (countFlag) {
+				totalCountFlag = true;
+				if (null == totalCountStartRow) {
+					totalCountStartRow = i;
+				}
+				// count the total value
+				// todo set cell style
+				Cell cell = totalRow.createCell(i);
+				if (BigDecimal.class.equals(type)) {
+					BigDecimal bigDecimal = countBigDecimalTotalValue(objectList, field);
+					CellStyle AmountStyle = getAmountStyle(workbook, format);
+					cell.setCellStyle(AmountStyle);
+					cell.setCellValue(bigDecimal.doubleValue());
+				}
+				if (Integer.class.equals(type)) {
+					Integer integer = countIntegerTotalValue(objectList, field);
+					cell.setCellValue(integer);
+				}
+				if (Long.class.equals(type)) {
+					Long longTotalValue = countLongTotalValue(objectList, field);
+					cell.setCellValue(longTotalValue);
+				}
+				if (Double.class.equals(type)) {
+					Double doubleTotalValue = countDoubleTotalValue(objectList, field);
+					CellStyle AmountStyle = getAmountStyle(workbook, format);
+					cell.setCellStyle(AmountStyle);
+					cell.setCellValue(doubleTotalValue);
+				}
+
+			}
+		}
+		// no countFlag, no need to count total
+		if (totalCountFlag) {
+			CellStyle summaryCellStyle = getSummaryCellStyle(workbook);
+			if (totalCountStartRow > 0) {
+				Cell cell = totalRow.createCell(totalCountStartRow - 1);
+				cell.setCellValue("Total:");
+				cell.setCellStyle(summaryCellStyle);
+			} else {
+				// First Column need to count total
+				Cell cell = totalRow.getCell(totalCountStartRow);
+				double numericCellValue = cell.getNumericCellValue();
+				String value = "Total: " + numericCellValue;
+				cell.setCellValue(value);
+				cell.setCellStyle(summaryCellStyle);
+			}
+		}
+	}
+
+	/**
+	 * write object to Excel
+	 * @param workbook workbook
+	 * @param objectList objectList
+	 * @param sheetName sheetName
+	 * @param tClass tClass
+	 * @param <T> <T>
+	 * @return
+	 * @throws IllegalAccessException
+	 * @throws InvocationTargetException
+	 * @throws NoSuchMethodException
+	 */
+	private static <T> ExcelExportUtils objectToWorkBook(Workbook workbook,String sheetName,  List<T> objectList, Class<T> tClass) throws IllegalAccessException, InvocationTargetException, NoSuchMethodException {
+
+		if (sheetName.length() > 31) {
+			sheetName = sheetName.substring(0,31);
+		}
+		Sheet sheet = workbook.getSheet(sheetName);
+		int startRow = 0;
+		if (null != sheet) {
+			startRow = sheet.getLastRowNum() + 2;
+		} else {
+			sheet = workbook.createSheet(sheetName);
+		}
+
+		Row headerRow = sheet.createRow(startRow);
+
+		// Set the Header Style
+		CellStyle headerCellStyle = getHeaderStyle(workbook);
+
+		// Set Date column Format
+		CellStyle dateCellStyle = getDateStyle(workbook, DateFormatStr);
+
+		// Set Amount column Format
+		//CellStyle amountCellStyle = getAmountStyle(workbook, AmountFormat);
+
+		// get pojo member
+		Field[] fields = tClass.getDeclaredFields();
+
+		// map headername with cell index
+		// cell index in header row
+		int cellNum = 0;
+		Map<String, Integer> indexMap = new ConcurrentHashMap<>();
+		for (int i = 0; i < fields.length; i++) {
+			// According to the Field Create Row Header
+			Field field = fields[i];
+			ExcelColumn annotation = field.getAnnotation(ExcelColumn.class);
+			if (null == annotation) {
+				continue;
+			}
+			String name = annotation.name();
+			Cell cell = headerRow.createCell(cellNum);
+			indexMap.put(name, cellNum);
+			cellNum++;
+			cell.setCellValue(name);
+			cell.setCellStyle(headerCellStyle);
+		}
+
+		int contentRow = startRow + 1;
+
+		// each row of data
+		for (T writeObject : objectList) {
+			Row row = sheet.createRow(contentRow++);
+
+			// get each object member
+			Field[] writeFields = writeObject.getClass().getDeclaredFields();
+			for (int i = 0; i < writeFields.length; i++) {
+				Field writeField = writeFields[i];
+				ExcelColumn annotation = writeField.getAnnotation(ExcelColumn.class);
+				if (null == annotation) {
+					continue;
+				}
+
+				// get hearder name by annotation.name
+				String name = annotation.name();
+				String format = annotation.numberFormat();
+
+				Integer index = indexMap.get(name);
+				Cell cell = row.createCell(index);
+				if (Date.class.equals(writeField.getType())) {
+					cell.setCellStyle(dateCellStyle);
+					writeField.setAccessible(true);
+					Object dateValue = writeField.get(writeObject);
+					cell.setCellValue((Date) dateValue);
+					continue;
+				}
+
+				String property = BeanUtils.getProperty(writeObject, writeField.getName());
+				if (StringUtils.isEmpty(property)) {
+					continue;
+				}
+				Class<?> type = writeField.getType();
+				if (Arrays.asList(NUMBER_CLASS_TYPE).contains(type)) {
+					if (BigDecimal.class.equals(type)) {
+						double value = new BigDecimal(property).doubleValue();
+						CellStyle AmountStyle = getAmountStyle(workbook, format);
+						cell.setCellStyle(AmountStyle);
+						writeField.setAccessible(true);
+						BigDecimal amountValue = (BigDecimal) writeField.get(writeObject);
+						Double amountValueInDb = amountValue.doubleValue();
+						cell.setCellValue(amountValueInDb);
+						cell.setCellValue(value);
+						continue;
+					}
+					cell.setCellValue(Double.parseDouble(property));
+				} else if (Arrays.asList(BOOLEAN_CLASS_TYPE).contains(type)) {
+					cell.setCellValue(Boolean.parseBoolean(property));
+				} else {
+					cell.setCellValue(BeanUtils.getProperty(writeObject, writeField.getName()));
+				}
+			}
+		}
+
+		// Auto Re-Size
+		for (int i = 1; i < cellNum; i++) {
+			sheet.autoSizeColumn(i);
+			sheet.autoSizeColumn(i, true);
+		}
+		return null;
+	}
+
+	public static void addSummary(Workbook workbook, String sheetName, List<String> summary) {
+		if (sheetName.length() > 31) {
+			sheetName = sheetName.substring(0,31);
+		}
+		Sheet sheet = workbook.getSheet(sheetName);
+		if (summary != null) {
+			int lastRow = sheet.getLastRowNum() + 2;
+			// Set the Header Style
+			CellStyle summaryCellStyle = getSummaryCellStyle(workbook);
+
+			for (String s : summary) {
+				Row summaryRow = sheet.createRow(lastRow++);
+				Cell cell = summaryRow.createCell(0);
+				cell.setCellStyle(summaryCellStyle);
+				cell.setCellValue(s);
+			}
+		}
+	}
+
+	/**
+	 * Write Excel workbook to file
+	 * @param workbook workbook
+	 * @param pathname  pathname
+	 * @throws IOException IOException
+	 */
+	public static void write(Workbook workbook, String pathname) throws IOException {
+		File outFile = new File(pathname);
+		FileOutputStream fileOutputStream = new FileOutputStream(outFile);
+		workbook.write(fileOutputStream);
+		fileOutputStream.close();
+	}
+
+	/**
+	 * Add Last RecordDate
+	 * @param workbook workbook
+	 * @param path path
+	 * @param sheetName sheetName
+	 * @param date date
+	 * @param <T> <T>
+	 * @throws Exception Exception
+	 */
+	public static <T> void addLastRecordDate(Workbook workbook, String path, String sheetName, Date date)
+			throws Exception {
+		Sheet sheet = workbook.getSheet(sheetName);
+		int startRow = 0;
+		if (null != sheet) {
+			startRow = sheet.getLastRowNum() + 2;
+		} else {
+			sheet = workbook.createSheet(sheetName);
+		}
+		DateFormat df = new SimpleDateFormat("dd-MM-yyyy HH:mm:ss");
+
+		Row row = sheet.createRow(startRow);
+		Cell cell = row.createCell(0);
+		cell.setCellValue("Last record date time: " + (date == null ? " " : df.format(date)));
+
+		FileOutputStream fileOutputStream = new FileOutputStream(new File(path));
+		workbook.write(fileOutputStream);
+		fileOutputStream.close();
+	}
+
+	public static CellStyle getHeaderStyle(Workbook workbook) {
+		// Set the Header Style
+		CellStyle headerCellStyle = workbook.createCellStyle();
+		Font headerFont = workbook.createFont();
+		headerFont.setBold(true);
+		headerFont.setFontHeightInPoints((short) 10);
+		headerFont.setColor(IndexedColors.BLACK.getIndex());
+		headerCellStyle.setFont(headerFont);
+		return headerCellStyle;
+	}
+
+	public static CellStyle getSummaryCellStyle(Workbook workbook) {
+		// Set the summary Font Style
+		Font summaryFont = workbook.createFont();
+		summaryFont.setBold(true);
+		summaryFont.setFontHeightInPoints((short) 10);
+		summaryFont.setColor(IndexedColors.BLACK.getIndex());
+
+		CellStyle summaryCellStyle = workbook.createCellStyle();
+		summaryCellStyle.setFont(summaryFont);
+		return summaryCellStyle;
+	}
+
+	public static CellStyle getHeadingCellStyle(Workbook workbook) {
+		// Set the summary Font Style
+		Font headingFont = workbook.createFont();
+		headingFont.setBold(true);
+		headingFont.setFontHeightInPoints((short) 10);
+		headingFont.setColor(IndexedColors.BLACK.getIndex());
+
+		CellStyle headingCellStyle = workbook.createCellStyle();
+		headingCellStyle.setFont(headingFont);
+		return headingCellStyle;
+	}
+
+	public static CellStyle getDateStyle(Workbook workbook, String dateFormat) {
+		CreationHelper creationHelper = workbook.getCreationHelper();
+		// Class Name to be Sheet Name
+
+		// Date Formatting
+		CellStyle dateCellStyle = workbook.createCellStyle();
+		dateCellStyle.setDataFormat(creationHelper.createDataFormat().getFormat(dateFormat));
+		return dateCellStyle;
+	}
+
+	public static CellStyle getAmountStyle(Workbook workbook, String amountFormat) {
+		// Amount Column Formatting
+		CellStyle amountCellStyle = workbook.createCellStyle();
+		DataFormat dataFormat = workbook.createDataFormat();
+		amountCellStyle.setDataFormat(dataFormat.getFormat(amountFormat));
+		return amountCellStyle;
+	}
+
+	// This method define the Parameter format
+	public static String getTenantPath(String value) {
+		// return String.format(TenantPathFormat, value);
+		return "Tenant Path : " + value;
+	}
+
+	// This method define the Parameter format
+	public static String getNetworkParam(List<String> value) {
+		// return String.format(NetworkFormat, value);
+		return "Network : " + value;
+	}
+
+	public static String getGLCodeParam(List<String> values) {
+		// return String.format(GL_CODE_Format, StringUtils.join(values, ", "));
+		return "GL code : " + StringUtils.join(values, ", ");
+	}
+
+	public static String getProductIdParam(List<String> values) {
+		// return String.format(PRODUCT_ID_Format, StringUtils.join(values, ", "));
+		return "Product ID : " + StringUtils.join(values, ", ");
+	}
+
+	public static String getOfferNameParam(List<String> values) {
+		// return String.format(PRODUCT_ID_Format, StringUtils.join(values, ", "));
+		return "Offer Name : " + StringUtils.join(values, ", ");
+	}
+
+	public static String getCallType(String value) {
+		return "Call Type : " + value;
+	}
+
+
+	// Parameters next line
+	// (For date range, show in one line is fine, i.e. Date Range: dd-mon-yyyy to
+	// dd-mon-yyyy)
+	// Date Range: dd-mon-yyyy to dd-mon-yyyy)
+
+	// This method define the Parameter format
+	public static String getDateRangeParam(String beginDateStr, String endDateStr) {
+		return "Date : " + beginDateStr + " to " + endDateStr;
+	}
+
+	public static String getDateRangeParam(Date beginDate, Date endDate) {
+
+		SimpleDateFormat dateRangeformat = new SimpleDateFormat(DateRangeformatStr);
+		String beginDateStr = dateRangeformat.format(beginDate);
+		String endDateStr = dateRangeformat.format(endDate);
+		return getDateRangeParam(beginDateStr, endDateStr);
+	}
+	
+	public static String getSelectedPlmn(List<String> plmnList) {
+		return "Selected PLMN: " + StringUtils.join(plmnList, ", ");
+	}
+	
+	public static String getSelectedCountries(List<String> countryList) {
+		return "Selected Countries: " + StringUtils.join(countryList, ", ");
+	}
+
+	public static <T> BigDecimal countBigDecimalTotalValue(List<T> objectList, Field field) {
+		return objectList.stream().map(data -> {
+			Field[] declaredFields = data.getClass().getDeclaredFields();
+			for (Field declaredField : declaredFields) {
+				declaredField.setAccessible(true);
+				if (declaredField.getName().equals(field.getName())) {
+					try {
+						BigDecimal value = (BigDecimal)declaredField.get(data);
+						return value;
+					} catch (IllegalAccessException e) {
+						// do nothing
+						e.printStackTrace();
+					}
+				}
+			}
+			return BigDecimal.valueOf(0);
+		}).collect(Collectors.toList()).stream()
+				.reduce(BigDecimal::add)
+				.orElse(BigDecimal.ZERO);
+
+	}
+
+	public static <T> Integer countIntegerTotalValue(List<T> objectList, Field field) {
+		return objectList.stream().map(data -> {
+			Field[] declaredFields = data.getClass().getDeclaredFields();
+			for (Field declaredField : declaredFields) {
+				declaredField.setAccessible(true);
+				if (declaredField.getName().equals(field.getName())) {
+					try {
+						return (Integer) declaredField.get(data);
+					} catch (IllegalAccessException e) {
+						// do nothing
+					}
+				}
+			}
+			return 0;
+		}).collect(Collectors.toList()).stream()
+				.reduce(0, Integer::sum);
+	}
+
+	public static <T> Long countLongTotalValue(List<T> objectList, Field field) {
+		return objectList.stream().map(data -> {
+			Field[] declaredFields = data.getClass().getDeclaredFields();
+			for (Field declaredField : declaredFields) {
+				declaredField.setAccessible(true);
+				if (declaredField.getName().equals(field.getName())) {
+					try {
+						return (Long) declaredField.get(data);
+					} catch (IllegalAccessException e) {
+						// do nothing
+					}
+				}
+			}
+			return 0L;
+		}).collect(Collectors.toList()).stream()
+				.reduce((long) 0,Long::sum);
+	}
+
+	public static <T> Double countDoubleTotalValue(List<T> objectList, Field field) {
+		return objectList.stream().map(data -> {
+			Field[] declaredFields = data.getClass().getDeclaredFields();
+			for (Field declaredField : declaredFields) {
+				declaredField.setAccessible(true);
+				if (declaredField.getName().equals(field.getName())) {
+					try {
+						return (Double) declaredField.get(data);
+					} catch (IllegalAccessException e) {
+						// do nothing
+					}
+				}
+			}
+			return (double) 0;
+		}).collect(Collectors.toList()).stream()
+				.reduce((double) 0, Double::sum);
+	}
+
+}
